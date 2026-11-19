@@ -41,8 +41,8 @@ jobs:
                   applicationId = "com.pribadi.threadsdl"
                   minSdk = 29
                   targetSdk = 34
-                  versionCode = 4
-                  versionName = "4.0"
+                  versionCode = 5
+                  versionName = "5.0"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -81,6 +81,7 @@ jobs:
           import android.os.Looper
           import android.provider.MediaStore
           import android.view.Gravity
+          import android.view.View
           import android.webkit.JavascriptInterface
           import android.webkit.WebView
           import android.webkit.WebViewClient
@@ -98,8 +99,11 @@ jobs:
               private lateinit var list: LinearLayout
               private lateinit var btn: Button
               private lateinit var web: WebView
+              private var allBox: CheckBox? = null
+              private var bulk = false
+              private var chosen = BooleanArray(0)
               private val items = ArrayList<Media>()
-              private val boxes = ArrayList<CheckBox>()
+              private val overlays = ArrayList<View>()
               private val captured = ArrayList<String>()
               private val seen = HashSet<Int>()
               private val handler = Handler(Looper.getMainLooper())
@@ -271,36 +275,66 @@ jobs:
                   return url
               }
 
+              private fun setSel(i: Int, v: Boolean) {
+                  chosen[i] = v
+                  overlays[i].visibility = if (v) View.VISIBLE else View.GONE
+              }
+
+              private fun syncAll() {
+                  bulk = true
+                  allBox?.isChecked = chosen.isNotEmpty() && chosen.all { it }
+                  bulk = false
+              }
+
               private fun show(found: List<Media>) {
-                  items.clear(); boxes.clear(); list.removeAllViews()
+                  items.clear(); overlays.clear(); list.removeAllViews()
                   items.addAll(found)
+                  chosen = BooleanArray(found.size)
                   val nv = found.count { it.video }
-                  say("Ketemu $nv video dan ${found.size - nv} foto. Centang yang mau diunduh.")
-                  list.addView(CheckBox(this).apply {
+                  say("Ketemu $nv video dan ${found.size - nv} foto. Sentuh gambar untuk memilih.")
+                  val all = CheckBox(this).apply {
                       text = "Pilih semua"
-                      setOnCheckedChangeListener { _, c -> boxes.forEach { it.isChecked = c } }
-                  })
+                      setOnCheckedChangeListener { _, c ->
+                          if (!bulk) for (i in chosen.indices) setSel(i, c)
+                      }
+                  }
+                  allBox = all
+                  list.addView(all)
+                  val gap = dp(4)
+                  val cw = (resources.displayMetrics.widthPixels - dp(32) - gap * 6) / 3
+                  val ch = cw * 16 / 9
+                  val grid = GridLayout(this).apply { columnCount = 3 }
                   found.forEachIndexed { i, m ->
-                      val box = CheckBox(this)
-                      boxes.add(box)
+                      val cell = FrameLayout(this)
                       val img = ImageView(this).apply {
                           scaleType = ImageView.ScaleType.CENTER_CROP
                           setBackgroundColor(Color.LTGRAY)
                       }
-                      val label = TextView(this).apply {
-                          text = "#${i + 1} " + if (m.video) "Video" else "Foto"
-                          setPadding(dp(12), 0, 0, 0)
+                      val ov = View(this).apply {
+                          setBackgroundColor(Color.argb(160, 255, 255, 255))
+                          visibility = View.GONE
                       }
-                      list.addView(LinearLayout(this).apply {
-                          orientation = LinearLayout.HORIZONTAL
-                          gravity = Gravity.CENTER_VERTICAL
-                          setPadding(0, dp(6), 0, dp(6))
-                          addView(box)
-                          addView(img, LinearLayout.LayoutParams(dp(96), dp(96)))
-                          addView(label)
+                      cell.addView(img, FrameLayout.LayoutParams(-1, -1))
+                      cell.addView(ov, FrameLayout.LayoutParams(-1, -1))
+                      if (m.video) {
+                          cell.addView(TextView(this).apply {
+                              text = "▶ Video"
+                              textSize = 11f
+                              setTextColor(Color.WHITE)
+                              setBackgroundColor(Color.argb(150, 0, 0, 0))
+                              setPadding(dp(6), dp(2), dp(6), dp(2))
+                          }, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.START))
+                      }
+                      overlays.add(ov)
+                      cell.setOnClickListener { setSel(i, !chosen[i]); syncAll() }
+                      grid.addView(cell, GridLayout.LayoutParams().apply {
+                          width = cw
+                          height = ch
+                          setMargins(gap, gap, gap, gap)
                       })
                       loadThumb(m.thumb, img)
                   }
+                  list.addView(grid)
                   btn.isEnabled = true
               }
 
@@ -310,7 +344,7 @@ jobs:
                       try {
                           val c = URL(u).openConnection() as HttpURLConnection
                           c.setRequestProperty("User-Agent", UA)
-                          val o = BitmapFactory.Options().apply { inSampleSize = 4 }
+                          val o = BitmapFactory.Options().apply { inSampleSize = 2 }
                           val bmp = BitmapFactory.decodeStream(c.inputStream, null, o)
                           runOnUiThread { v.setImageBitmap(bmp) }
                       } catch (e: Exception) {
@@ -319,8 +353,8 @@ jobs:
               }
 
               private fun download() {
-                  val sel = items.filterIndexed { i, _ -> boxes[i].isChecked }
-                  if (sel.isEmpty()) { say("Centang dulu minimal satu."); return }
+                  val sel = items.filterIndexed { i, _ -> chosen[i] }
+                  if (sel.isEmpty()) { say("Sentuh dulu minimal satu gambar."); return }
                   btn.isEnabled = false
                   Thread {
                       var ok = 0
