@@ -41,8 +41,8 @@ jobs:
                   applicationId = "com.pribadi.threadsdl"
                   minSdk = 29
                   targetSdk = 34
-                  versionCode = 5
-                  versionName = "5.0"
+                  versionCode = 6
+                  versionName = "6.0"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -83,11 +83,13 @@ jobs:
           import android.view.Gravity
           import android.view.View
           import android.webkit.JavascriptInterface
+          import android.webkit.WebResourceRequest
           import android.webkit.WebView
           import android.webkit.WebViewClient
           import android.widget.*
           import org.json.JSONArray
           import org.json.JSONObject
+          import java.math.BigInteger
           import java.net.HttpURLConnection
           import java.net.URL
 
@@ -109,6 +111,7 @@ jobs:
               private val handler = Handler(Looper.getMainLooper())
               private var gen = 0
               private var lastLink = ""
+              private var knownCode = ""
               private val UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
 
               private val HOOK = """(function(){if(window.__h)return;window.__h=1;
@@ -129,6 +132,20 @@ jobs:
 
               private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
 
+              // ubah nomor post (angka) menjadi kode pendek di alamat Threads
+              private fun shortcode(pk: String): String {
+                  val alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+                  var n = BigInteger(pk)
+                  val base = BigInteger.valueOf(64)
+                  val sb = StringBuilder()
+                  while (n.signum() > 0) {
+                      val qr = n.divideAndRemainder(base)
+                      sb.append(alpha[qr[1].toInt()])
+                      n = qr[0]
+                  }
+                  return sb.reverse().toString()
+              }
+
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   input = EditText(this).apply { hint = "Link Threads"; setSingleLine() }
@@ -148,6 +165,17 @@ jobs:
                   web.settings.userAgentString = UA
                   web.addJavascriptInterface(Bridge(), "B")
                   web.webViewClient = object : WebViewClient() {
+                      override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                          val u = request.url
+                          if (u.scheme == "http" || u.scheme == "https") return false
+                          val id = u.getQueryParameter("id")?.substringBefore("_")
+                          if (u.scheme == "barcelona" && id != null && id.isNotEmpty() && id.all { it.isDigit() }) {
+                              val c = shortcode(id)
+                              knownCode = c
+                              view.loadUrl("https://www.threads.com/t/$c")
+                          }
+                          return true
+                      }
                       override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
                           view.evaluateJavascript(HOOK, null)
                       }
@@ -187,6 +215,7 @@ jobs:
                   list.removeAllViews()
                   btn.isEnabled = false
                   synchronized(captured) { captured.clear(); seen.clear() }
+                  knownCode = ""
                   val my = ++gen
                   web.loadUrl(link)
                   poll(my, 0)
@@ -196,15 +225,16 @@ jobs:
                   if (my != gen) return
                   web.evaluateJavascript(SCRIPTS, null)
                   val url = web.url ?: ""
-                  val code = Regex("/post/([A-Za-z0-9_-]+)").find(url)?.groupValues?.get(1) ?: ""
+                  val code = Regex("/(?:post|t)/([A-Za-z0-9_-]+)").find(url)?.groupValues?.get(1) ?: knownCode
                   val docs = synchronized(captured) { ArrayList(captured) }
                   if (code.isNotEmpty() || tick >= 12) {
-                      val found = parse(docs, code)
+                      var found = parse(docs, code)
+                      if (found.isEmpty() && tick >= 20 && code.isNotEmpty()) found = parse(docs, "")
                       if (found.isNotEmpty()) { show(found); return }
                   }
                   if (tick >= 25) {
                       lastLink = ""
-                      say("Tidak ditemukan. url=$url; data=${docs.size}")
+                      say("Tidak ditemukan. url=$url; kode=$code; data=${docs.size}")
                       return
                   }
                   handler.postDelayed({ poll(my, tick + 1) }, 1000)
