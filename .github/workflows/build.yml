@@ -41,8 +41,8 @@ jobs:
                   applicationId = "com.pribadi.threadsdl"
                   minSdk = 29
                   targetSdk = 34
-                  versionCode = 2
-                  versionName = "2.0"
+                  versionCode = 3
+                  versionName = "3.0"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -142,15 +142,19 @@ jobs:
                   runOnUiThread { btn.isEnabled = false; list.removeAllViews() }
                   Thread {
                       try {
-                          val code = Regex("/post/([A-Za-z0-9_-]+)").find(link)?.groupValues?.get(1) ?: ""
                           val c = URL(link).openConnection() as HttpURLConnection
                           c.setRequestProperty("User-Agent", UA)
                           c.setRequestProperty("Accept-Language", "en-US,en;q=0.9")
                           c.connectTimeout = 15000
                           c.readTimeout = 20000
                           val html = c.inputStream.bufferedReader().readText()
+                          val finalUrl = c.url.toString()
+                          val re = Regex("/post/([A-Za-z0-9_-]+)")
+                          val code = re.find(finalUrl)?.groupValues?.get(1)
+                              ?: re.find(html)?.groupValues?.get(1) ?: ""
                           val found = parse(html, code)
-                          runOnUiThread { show(found, html.length / 1000) }
+                          val diag = "kode=$code, img=${html.contains("image_versions2")}, vid=${html.contains("video_versions")}"
+                          runOnUiThread { show(found, html.length / 1000, diag) }
                       } catch (e: Exception) {
                           lastLink = ""
                           say("Gagal: ${e.message}")
@@ -160,19 +164,26 @@ jobs:
 
               private fun parse(html: String, code: String): List<Media> {
                   val re = Regex("<script[^>]*type=\"application/json\"[^>]*>(.*?)</script>", RegexOption.DOT_MATCHES_ALL)
+                  val roots = ArrayList<JSONObject>()
                   for (m in re.findAll(html)) {
-                      try {
-                          val post = findPost(JSONObject(m.groupValues[1]), code) ?: continue
-                          return collect(post)
-                      } catch (e: Exception) {
-                      }
+                      try { roots.add(JSONObject(m.groupValues[1])) } catch (e: Exception) { }
+                  }
+                  for (r in roots) {
+                      val p = findPost(r, code) ?: continue
+                      val res = collect(p)
+                      if (res.isNotEmpty()) return res
+                  }
+                  for (r in roots) {
+                      val p = findPost(r, "") ?: continue
+                      val res = collect(p)
+                      if (res.isNotEmpty()) return res
                   }
                   return emptyList()
               }
 
               private fun findPost(n: Any?, code: String): JSONObject? {
                   if (n is JSONObject) {
-                      if (n.optString("code") == code &&
+                      if ((code.isEmpty() || n.optString("code") == code) &&
                           (n.has("image_versions2") || n.has("video_versions") || n.has("carousel_media"))) return n
                       for (k in n.keys()) findPost(n.opt(k), code)?.let { return it }
                   } else if (n is JSONArray) {
@@ -201,7 +212,6 @@ jobs:
                   else null
               }
 
-              // pilih versi dengan resolusi terbesar
               private fun best(a: JSONArray?): String? {
                   if (a == null) return null
                   var url: String? = null
@@ -216,11 +226,11 @@ jobs:
                   return url
               }
 
-              private fun show(found: List<Media>, kb: Int) {
+              private fun show(found: List<Media>, kb: Int, diag: String) {
                   items.clear(); boxes.clear(); list.removeAllViews()
                   if (found.isEmpty()) {
                       lastLink = ""
-                      say("Foto/video tidak ditemukan (halaman terbaca $kb KB). Pastikan postingan publik.")
+                      say("Foto/video tidak ditemukan (halaman $kb KB; $diag).")
                       return
                   }
                   items.addAll(found)
