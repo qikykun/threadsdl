@@ -39,10 +39,10 @@ jobs:
               compileSdk = 34
               defaultConfig {
                   applicationId = "com.pribadi.threadsdl"
-                  minSdk = 24
+                  minSdk = 29
                   targetSdk = 34
-                  versionCode = 1
-                  versionName = "1.0"
+                  versionCode = 2
+                  versionName = "2.0"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -71,34 +71,54 @@ jobs:
           package com.pribadi.threadsdl
 
           import android.app.Activity
-          import android.app.DownloadManager
           import android.content.ClipboardManager
-          import android.net.Uri
+          import android.content.ContentValues
+          import android.graphics.BitmapFactory
+          import android.graphics.Color
           import android.os.Bundle
-          import android.os.Environment
-          import android.widget.EditText
-          import android.widget.LinearLayout
-          import android.widget.TextView
+          import android.provider.MediaStore
+          import android.view.Gravity
+          import android.widget.*
+          import org.json.JSONArray
+          import org.json.JSONObject
           import java.net.HttpURLConnection
           import java.net.URL
+
+          class Media(val url: String, val video: Boolean, val thumb: String)
 
           class MainActivity : Activity() {
               private lateinit var input: EditText
               private lateinit var status: TextView
+              private lateinit var list: LinearLayout
+              private lateinit var btn: Button
+              private val items = ArrayList<Media>()
+              private val boxes = ArrayList<CheckBox>()
               private var lastLink = ""
+              private val UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
+
+              private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
-                  val pad = (24 * resources.displayMetrics.density).toInt()
                   input = EditText(this).apply { hint = "Link Threads"; setSingleLine() }
                   status = TextView(this).apply {
                       text = "Salin link Threads, lalu buka aplikasi ini."
-                      setPadding(0, pad, 0, 0)
+                      setPadding(0, dp(8), 0, dp(8))
                   }
+                  list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  btn = Button(this).apply {
+                      text = "Download"
+                      isEnabled = false
+                      setOnClickListener { download() }
+                  }
+                  val scroll = ScrollView(this).apply { addView(list) }
                   setContentView(LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
-                      setPadding(pad, pad * 2, pad, pad)
-                      addView(input); addView(status)
+                      setPadding(dp(16), dp(40), dp(16), dp(16))
+                      addView(input)
+                      addView(status)
+                      addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+                      addView(btn)
                   })
               }
 
@@ -112,34 +132,25 @@ jobs:
                   if (link == lastLink) return
                   lastLink = link
                   input.setText(link)
-                  fetchAndDownload(link)
+                  load(link)
               }
 
-              private fun fetchAndDownload(link: String) {
-                  say("Mengambil media...")
+              private fun say(s: String) = runOnUiThread { status.text = s }
+
+              private fun load(link: String) {
+                  say("Mengambil daftar foto/video...")
+                  runOnUiThread { btn.isEnabled = false; list.removeAllViews() }
                   Thread {
                       try {
+                          val code = Regex("/post/([A-Za-z0-9_-]+)").find(link)?.groupValues?.get(1) ?: ""
                           val c = URL(link).openConnection() as HttpURLConnection
-                          c.setRequestProperty("User-Agent", "facebookexternalhit/1.1")
-                          c.connectTimeout = 15000; c.readTimeout = 15000
+                          c.setRequestProperty("User-Agent", UA)
+                          c.setRequestProperty("Accept-Language", "en-US,en;q=0.9")
+                          c.connectTimeout = 15000
+                          c.readTimeout = 20000
                           val html = c.inputStream.bufferedReader().readText()
-                          val videos = find(html, "\"video_versions\":\\[\\{[^\\]]*?\"url\":\"(.*?)\"") +
-                                  find(html, "property=\"og:video\" content=\"(.*?)\"")
-                          val images = find(html, "\"candidates\":\\[\\{[^\\]]*?\"url\":\"(.*?)\"") +
-                                  find(html, "property=\"og:image\" content=\"(.*?)\"")
-                          val files = if (videos.isNotEmpty()) videos.map { it to "mp4" }
-                                      else images.map { it to "jpg" }
-                          if (files.isEmpty()) { say("Tidak ada foto/video ditemukan."); return@Thread }
-                          val dm = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
-                          val stamp = System.currentTimeMillis()
-                          val uniq = files.distinctBy { it.first }
-                          uniq.forEachIndexed { i, (url, ext) ->
-                              dm.enqueue(DownloadManager.Request(Uri.parse(url))
-                                  .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                                  .setDestinationInExternalPublicDir(
-                                      Environment.DIRECTORY_DOWNLOADS, "Threads/threads_${stamp}_$i.$ext"))
-                          }
-                          say("Mengunduh ${uniq.size} file ke Downloads/Threads")
+                          val found = parse(html, code)
+                          runOnUiThread { show(found, html.length / 1000) }
                       } catch (e: Exception) {
                           lastLink = ""
                           say("Gagal: ${e.message}")
@@ -147,17 +158,66 @@ jobs:
                   }.start()
               }
 
-              private fun find(html: String, pattern: String): List<String> =
-                  Regex(pattern).findAll(html).map {
-                      it.groupValues[1].replace("\\/", "/").replace("\\u0026", "&").replace("&amp;", "&")
-                  }.toList()
+              private fun parse(html: String, code: String): List<Media> {
+                  val re = Regex("<script[^>]*type=\"application/json\"[^>]*>(.*?)</script>", RegexOption.DOT_MATCHES_ALL)
+                  for (m in re.findAll(html)) {
+                      try {
+                          val post = findPost(JSONObject(m.groupValues[1]), code) ?: continue
+                          return collect(post)
+                      } catch (e: Exception) {
+                      }
+                  }
+                  return emptyList()
+              }
 
-              private fun say(s: String) = runOnUiThread { status.text = s }
-          }
-          EOF
-      - name: Build
-        run: gradle assembleDebug
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ github.run_number }}
-          files: app/build/outputs/apk/debug/app-debug.apk
+              private fun findPost(n: Any?, code: String): JSONObject? {
+                  if (n is JSONObject) {
+                      if (n.optString("code") == code &&
+                          (n.has("image_versions2") || n.has("video_versions") || n.has("carousel_media"))) return n
+                      for (k in n.keys()) findPost(n.opt(k), code)?.let { return it }
+                  } else if (n is JSONArray) {
+                      for (i in 0 until n.length()) findPost(n.opt(i), code)?.let { return it }
+                  }
+                  return null
+              }
+
+              private fun collect(p: JSONObject): List<Media> {
+                  val out = ArrayList<Media>()
+                  val car = p.optJSONArray("carousel_media")
+                  if (car != null && car.length() > 0) {
+                      for (i in 0 until car.length()) one(car.optJSONObject(i))?.let { out.add(it) }
+                  } else {
+                      one(p)?.let { out.add(it) }
+                  }
+                  return out
+              }
+
+              private fun one(o: JSONObject?): Media? {
+                  if (o == null) return null
+                  val thumb = best(o.optJSONObject("image_versions2")?.optJSONArray("candidates")) ?: ""
+                  val vid = best(o.optJSONArray("video_versions"))
+                  return if (vid != null) Media(vid, true, thumb)
+                  else if (thumb.isNotEmpty()) Media(thumb, false, thumb)
+                  else null
+              }
+
+              // pilih versi dengan resolusi terbesar
+              private fun best(a: JSONArray?): String? {
+                  if (a == null) return null
+                  var url: String? = null
+                  var area = -1L
+                  for (i in 0 until a.length()) {
+                      val o = a.optJSONObject(i) ?: continue
+                      val u = o.optString("url")
+                      if (u.isEmpty()) continue
+                      val s = o.optLong("width") * o.optLong("height")
+                      if (s > area) { area = s; url = u }
+                  }
+                  return url
+              }
+
+              private fun show(found: List<Media>, kb: Int) {
+                  items.clear(); boxes.clear(); list.removeAllViews()
+                  if (found.isEmpty()) {
+                      lastLink = ""
+                      say("Foto/video tidak ditemukan (halaman terbaca $kb KB). Pastikan postingan publik.")
