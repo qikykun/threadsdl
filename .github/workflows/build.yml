@@ -41,8 +41,8 @@ jobs:
                   applicationId = "com.pribadi.threadsdl"
                   minSdk = 29
                   targetSdk = 34
-                  versionCode = 3
-                  versionName = "3.0"
+                  versionCode = 4
+                  versionName = "4.0"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -73,11 +73,17 @@ jobs:
           import android.app.Activity
           import android.content.ClipboardManager
           import android.content.ContentValues
+          import android.graphics.Bitmap
           import android.graphics.BitmapFactory
           import android.graphics.Color
           import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
           import android.provider.MediaStore
           import android.view.Gravity
+          import android.webkit.JavascriptInterface
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
           import android.widget.*
           import org.json.JSONArray
           import org.json.JSONObject
@@ -91,10 +97,31 @@ jobs:
               private lateinit var status: TextView
               private lateinit var list: LinearLayout
               private lateinit var btn: Button
+              private lateinit var web: WebView
               private val items = ArrayList<Media>()
               private val boxes = ArrayList<CheckBox>()
+              private val captured = ArrayList<String>()
+              private val seen = HashSet<Int>()
+              private val handler = Handler(Looper.getMainLooper())
+              private var gen = 0
               private var lastLink = ""
               private val UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
+
+              private val HOOK = """(function(){if(window.__h)return;window.__h=1;
+          var f=window.fetch;
+          if(f){window.fetch=function(){return f.apply(this,arguments).then(function(r){try{r.clone().text().then(function(t){if(t.indexOf('image_versions2')>-1||t.indexOf('video_versions')>-1)B.put(t)})}catch(e){}return r})}}
+          var o=XMLHttpRequest.prototype.send;
+          XMLHttpRequest.prototype.send=function(){this.addEventListener('load',function(){try{var t=this.responseText;if(t&&(t.indexOf('image_versions2')>-1||t.indexOf('video_versions')>-1))B.put(t)}catch(e){}});return o.apply(this,arguments)};
+          })();"""
+
+              private val SCRIPTS = """Array.from(document.querySelectorAll('script[type="application/json"]')).forEach(function(s){var t=s.textContent;if(t.indexOf('image_versions2')>-1||t.indexOf('video_versions')>-1)B.put(t)})"""
+
+              inner class Bridge {
+                  @JavascriptInterface
+                  fun put(s: String) {
+                      synchronized(captured) { if (seen.add(s.hashCode())) captured.add(s) }
+                  }
+              }
 
               private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
 
@@ -111,6 +138,19 @@ jobs:
                       isEnabled = false
                       setOnClickListener { download() }
                   }
+                  web = WebView(this)
+                  web.settings.javaScriptEnabled = true
+                  web.settings.domStorageEnabled = true
+                  web.settings.userAgentString = UA
+                  web.addJavascriptInterface(Bridge(), "B")
+                  web.webViewClient = object : WebViewClient() {
+                      override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
+                          view.evaluateJavascript(HOOK, null)
+                      }
+                      override fun onPageFinished(view: WebView, url: String?) {
+                          view.evaluateJavascript(HOOK, null)
+                      }
+                  }
                   val scroll = ScrollView(this).apply { addView(list) }
                   setContentView(LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
@@ -119,6 +159,7 @@ jobs:
                       addView(status)
                       addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
                       addView(btn)
+                      addView(web, LinearLayout.LayoutParams(1, 1))
                   })
               }
 
@@ -138,45 +179,49 @@ jobs:
               private fun say(s: String) = runOnUiThread { status.text = s }
 
               private fun load(link: String) {
-                  say("Mengambil daftar foto/video...")
-                  runOnUiThread { btn.isEnabled = false; list.removeAllViews() }
-                  Thread {
-                      try {
-                          val c = URL(link).openConnection() as HttpURLConnection
-                          c.setRequestProperty("User-Agent", UA)
-                          c.setRequestProperty("Accept-Language", "en-US,en;q=0.9")
-                          c.connectTimeout = 15000
-                          c.readTimeout = 20000
-                          val html = c.inputStream.bufferedReader().readText()
-                          val finalUrl = c.url.toString()
-                          val re = Regex("/post/([A-Za-z0-9_-]+)")
-                          val code = re.find(finalUrl)?.groupValues?.get(1)
-                              ?: re.find(html)?.groupValues?.get(1) ?: ""
-                          val found = parse(html, code)
-                          val diag = "kode=$code, img=${html.contains("image_versions2")}, vid=${html.contains("video_versions")}"
-                          runOnUiThread { show(found, html.length / 1000, diag) }
-                      } catch (e: Exception) {
-                          lastLink = ""
-                          say("Gagal: ${e.message}")
-                      }
-                  }.start()
+                  say("Membuka postingan... (tunggu sampai 25 detik)")
+                  list.removeAllViews()
+                  btn.isEnabled = false
+                  synchronized(captured) { captured.clear(); seen.clear() }
+                  val my = ++gen
+                  web.loadUrl(link)
+                  poll(my, 0)
               }
 
-              private fun parse(html: String, code: String): List<Media> {
-                  val re = Regex("<script[^>]*type=\"application/json\"[^>]*>(.*?)</script>", RegexOption.DOT_MATCHES_ALL)
-                  val roots = ArrayList<JSONObject>()
-                  for (m in re.findAll(html)) {
-                      try { roots.add(JSONObject(m.groupValues[1])) } catch (e: Exception) { }
+              private fun poll(my: Int, tick: Int) {
+                  if (my != gen) return
+                  web.evaluateJavascript(SCRIPTS, null)
+                  val url = web.url ?: ""
+                  val code = Regex("/post/([A-Za-z0-9_-]+)").find(url)?.groupValues?.get(1) ?: ""
+                  val docs = synchronized(captured) { ArrayList(captured) }
+                  if (code.isNotEmpty() || tick >= 12) {
+                      val found = parse(docs, code)
+                      if (found.isNotEmpty()) { show(found); return }
                   }
-                  for (r in roots) {
-                      val p = findPost(r, code) ?: continue
-                      val res = collect(p)
-                      if (res.isNotEmpty()) return res
+                  if (tick >= 25) {
+                      lastLink = ""
+                      say("Tidak ditemukan. url=$url; data=${docs.size}")
+                      return
                   }
-                  for (r in roots) {
-                      val p = findPost(r, "") ?: continue
-                      val res = collect(p)
-                      if (res.isNotEmpty()) return res
+                  handler.postDelayed({ poll(my, tick + 1) }, 1000)
+              }
+
+              private fun parse(docs: List<String>, code: String): List<Media> {
+                  for (d in docs) {
+                      val s = d.trim().removePrefix("for (;;);")
+                      val roots = ArrayList<JSONObject>()
+                      try {
+                          roots.add(JSONObject(s))
+                      } catch (e: Exception) {
+                          for (line in s.split("\n")) {
+                              try { roots.add(JSONObject(line)) } catch (e2: Exception) { }
+                          }
+                      }
+                      for (r in roots) {
+                          val p = findPost(r, code) ?: continue
+                          val res = collect(p)
+                          if (res.isNotEmpty()) return res
+                      }
                   }
                   return emptyList()
               }
@@ -226,13 +271,8 @@ jobs:
                   return url
               }
 
-              private fun show(found: List<Media>, kb: Int, diag: String) {
+              private fun show(found: List<Media>) {
                   items.clear(); boxes.clear(); list.removeAllViews()
-                  if (found.isEmpty()) {
-                      lastLink = ""
-                      say("Foto/video tidak ditemukan (halaman $kb KB; $diag).")
-                      return
-                  }
                   items.addAll(found)
                   val nv = found.count { it.video }
                   say("Ketemu $nv video dan ${found.size - nv} foto. Centang yang mau diunduh.")
