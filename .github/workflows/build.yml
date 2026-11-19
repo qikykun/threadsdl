@@ -221,3 +221,91 @@ jobs:
                   if (found.isEmpty()) {
                       lastLink = ""
                       say("Foto/video tidak ditemukan (halaman terbaca $kb KB). Pastikan postingan publik.")
+                      return
+                  }
+                  items.addAll(found)
+                  val nv = found.count { it.video }
+                  say("Ketemu $nv video dan ${found.size - nv} foto. Centang yang mau diunduh.")
+                  list.addView(CheckBox(this).apply {
+                      text = "Pilih semua"
+                      setOnCheckedChangeListener { _, c -> boxes.forEach { it.isChecked = c } }
+                  })
+                  found.forEachIndexed { i, m ->
+                      val box = CheckBox(this)
+                      boxes.add(box)
+                      val img = ImageView(this).apply {
+                          scaleType = ImageView.ScaleType.CENTER_CROP
+                          setBackgroundColor(Color.LTGRAY)
+                      }
+                      val label = TextView(this).apply {
+                          text = "#${i + 1} " + if (m.video) "Video" else "Foto"
+                          setPadding(dp(12), 0, 0, 0)
+                      }
+                      list.addView(LinearLayout(this).apply {
+                          orientation = LinearLayout.HORIZONTAL
+                          gravity = Gravity.CENTER_VERTICAL
+                          setPadding(0, dp(6), 0, dp(6))
+                          addView(box)
+                          addView(img, LinearLayout.LayoutParams(dp(96), dp(96)))
+                          addView(label)
+                      })
+                      loadThumb(m.thumb, img)
+                  }
+                  btn.isEnabled = true
+              }
+
+              private fun loadThumb(u: String, v: ImageView) {
+                  if (u.isEmpty()) return
+                  Thread {
+                      try {
+                          val c = URL(u).openConnection() as HttpURLConnection
+                          c.setRequestProperty("User-Agent", UA)
+                          val o = BitmapFactory.Options().apply { inSampleSize = 4 }
+                          val bmp = BitmapFactory.decodeStream(c.inputStream, null, o)
+                          runOnUiThread { v.setImageBitmap(bmp) }
+                      } catch (e: Exception) {
+                      }
+                  }.start()
+              }
+
+              private fun download() {
+                  val sel = items.filterIndexed { i, _ -> boxes[i].isChecked }
+                  if (sel.isEmpty()) { say("Centang dulu minimal satu."); return }
+                  btn.isEnabled = false
+                  Thread {
+                      var ok = 0
+                      sel.forEachIndexed { n, m ->
+                          say("Mengunduh ${n + 1} dari ${sel.size}... (jangan tutup aplikasi)")
+                          try { save(m, n); ok++ } catch (e: Exception) { }
+                      }
+                      say("Selesai: $ok dari ${sel.size} tersimpan di galeri (album Threads).")
+                      runOnUiThread { btn.isEnabled = true }
+                  }.start()
+              }
+
+              private fun save(m: Media, n: Int) {
+                  val name = "threads_${System.currentTimeMillis()}_$n" + if (m.video) ".mp4" else ".jpg"
+                  val v = ContentValues().apply {
+                      put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                      put(MediaStore.MediaColumns.MIME_TYPE, if (m.video) "video/mp4" else "image/jpeg")
+                      put(MediaStore.MediaColumns.RELATIVE_PATH, (if (m.video) "Movies" else "Pictures") + "/Threads")
+                      put(MediaStore.MediaColumns.IS_PENDING, 1)
+                  }
+                  val col = if (m.video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                            else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                  val uri = contentResolver.insert(col, v)!!
+                  val c = URL(m.url).openConnection() as HttpURLConnection
+                  c.setRequestProperty("User-Agent", UA)
+                  c.inputStream.use { i -> contentResolver.openOutputStream(uri)!!.use { o -> i.copyTo(o) } }
+                  v.clear()
+                  v.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                  contentResolver.update(uri, v, null, null)
+              }
+          }
+          EOF
+      - name: Build
+        run: gradle assembleDebug
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          files: app/build/outputs/apk/debug/app-debug.apk
